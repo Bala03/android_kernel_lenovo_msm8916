@@ -1,15 +1,62 @@
-MODNAME := wlan
-WLAN_ROOT := drivers/staging/prima
+# We can build either as part of a standalone Kernel build or part
+# of an Android build.  Determine which mechanism is being used
+ifeq ($(MODNAME),)
+	KERNEL_BUILD := 1
+else
+	KERNEL_BUILD := 0
+endif
 
-# Feature flags which are not (currently) configurable via Kconfig
+ifeq ($(KERNEL_BUILD),1)
+	# These are provided in Android-based builds
+	# Need to explicitly define for Kernel-based builds
+	MODNAME := wlan
+	WLAN_ROOT := drivers/staging/prima
+endif
+
+ifeq ($(KERNEL_BUILD), 0)
+# These are configurable via Kconfig for kernel-based builds
+# Need to explicitly configure for Android-based builds
+
+#Flag to enable BlueTooth AMP feature
+    CONFIG_PRIMA_WLAN_BTAMP := n
+
+#Flag to enable Legacy Fast Roaming(LFR)
+    CONFIG_PRIMA_WLAN_LFR := y
+
+#JB kernel has PMKSA patches, hence enabling this flag
+    CONFIG_PRIMA_WLAN_OKC := y
+
+# JB kernel has CPU enablement patches, so enable
+    CONFIG_PRIMA_WLAN_11AC_HIGH_TP := y
+
+#Flag to enable TDLS feature
+    CONFIG_QCOM_TDLS := y
+
+#Flag to enable Fast Transition (11r) feature
+    CONFIG_QCOM_VOWIFI_11R := y
+
+#Flag to enable Protected Managment Frames (11w) feature
+ifneq ($(CONFIG_PRONTO_WLAN),)
+    CONFIG_WLAN_FEATURE_11W := y
+    endif
+
+#Flag to enable new Linux Regulatory implementation
+    CONFIG_ENABLE_LINUX_REG := y
+
+#Flag to enable offload packets feature
+    CONFIG_WLAN_OFFLOAD_PACKETS := y
+
+    endif
 
 # To enable CONFIG_QCOM_ESE_UPLOAD, dependent config
 # CONFIG_QCOM_ESE must be enabled.
 CONFIG_QCOM_ESE := n
 CONFIG_QCOM_ESE_UPLOAD := n
 
+# Feature flags which are not (currently) configurable via Kconfig
+
 #Whether to build debug version
-BUILD_DEBUG_VERSION := 1
+BUILD_DEBUG_VERSION := 0
 
 #Enable this flag to build driver in diag version
 BUILD_DIAG_VERSION := 1
@@ -19,9 +66,6 @@ PANIC_ON_BUG := 1
 
 #Re-enable wifi on WDI timeout
 RE_ENABLE_WIFI_ON_WDI_TIMEOUT := 0
-
-#Measure Roam Delay
-MEASURE_ROAM_TIME_DELAY := 0
 
 ifeq ($(CONFIG_CFG80211),y)
 HAVE_CFG80211 := 1
@@ -155,6 +199,7 @@ MAC_LIM_OBJS := $(MAC_SRC_DIR)/pe/lim/limAIDmgmt.o \
 		$(MAC_SRC_DIR)/pe/lim/limProcessProbeRspFrame.o \
 		$(MAC_SRC_DIR)/pe/lim/limProcessSmeReqMessages.o \
 		$(MAC_SRC_DIR)/pe/lim/limPropExtsUtils.o \
+		$(MAC_SRC_DIR)/pe/lim/limRMC.o \
 		$(MAC_SRC_DIR)/pe/lim/limRoamingAlgo.o \
 		$(MAC_SRC_DIR)/pe/lim/limScanResultUtils.o \
 		$(MAC_SRC_DIR)/pe/lim/limSecurityUtils.o \
@@ -231,9 +276,9 @@ SME_CSR_OBJS := $(SME_SRC_DIR)/csr/csrApiRoam.o \
 		$(SME_SRC_DIR)/csr/csrNeighborRoam.o \
 		$(SME_SRC_DIR)/csr/csrUtil.o
 
-ifeq ($(CONFIG_QCOM_CCX),y)
-ifneq ($(CONFIG_QCOM_CCX_UPLOAD),y)
-SME_CSR_OBJS += $(SME_SRC_DIR)/csr/csrCcx.o
+ifeq ($(CONFIG_QCOM_ESE),y)
+ifneq ($(CONFIG_QCOM_ESE_UPLOAD),y)
+SME_CSR_OBJS += $(SME_SRC_DIR)/csr/csrEse.o
 endif
 endif
 
@@ -259,6 +304,9 @@ SME_P2P_OBJS = $(SME_SRC_DIR)/p2p/p2p_Api.o
 
 SME_RRM_OBJS := $(SME_SRC_DIR)/rrm/sme_rrm.o
 
+SME_NAN_OBJS = $(SME_SRC_DIR)/nan/nan_Api.o
+
+
 SME_OBJS :=	$(SME_BTC_OBJS) \
 		$(SME_CCM_OBJS) \
 		$(SME_CMN_OBJS) \
@@ -267,7 +315,8 @@ SME_OBJS :=	$(SME_BTC_OBJS) \
 		$(SME_P2P_OBJS) \
 		$(SME_PMC_OBJS) \
 		$(SME_QOS_OBJS) \
-		$(SME_RRM_OBJS)
+		$(SME_RRM_OBJS) \
+		$(SME_NAN_OBJS)
 
 ############ SVC ############
 SVC_DIR :=	CORE/SVC
@@ -461,6 +510,7 @@ OBJS :=		$(BAP_OBJS) \
 		$(WDI_OBJS)
 
 EXTRA_CFLAGS += $(INCS)
+EXTRA_CFLAGS += -fno-pic
 
 CDEFINES :=	-DANI_BUS_TYPE_PLATFORM=1 \
 		-DANI_LITTLE_BYTE_ENDIAN \
@@ -501,6 +551,7 @@ CDEFINES :=	-DANI_BUS_TYPE_PLATFORM=1 \
 		-DWLAN_FEATURE_GTK_OFFLOAD \
 		-DWLAN_WAKEUP_EVENTS \
 	        -DWLAN_KD_READY_NOTIFIER \
+		-DWLAN_FEATURE_RMC \
 		-DWLAN_NL80211_TESTMODE \
 		-DFEATURE_WLAN_BATCH_SCAN \
 		-DFEATURE_WLAN_LPHB \
@@ -511,7 +562,9 @@ CDEFINES :=	-DANI_BUS_TYPE_PLATFORM=1 \
                 -DWLAN_DXE_LOW_RESOURCE_TIMER \
                 -DWLAN_LOGGING_SOCK_SVC_ENABLE \
                 -DWLAN_FEATURE_LINK_LAYER_STATS \
-                -DWLAN_FEATURE_EXTSCAN
+                -DWLAN_FEATURE_EXTSCAN \
+                -DFEATURE_EXT_LL_STAT \
+                -DWLAN_VOWIFI_DEBUG
 
 ifneq ($(CONFIG_PRONTO_WLAN),)
 CDEFINES += -DWCN_PRONTO
@@ -525,6 +578,7 @@ CDEFINES +=	-DWLAN_DEBUG \
 		-DSME_TRACE_RECORD \
 		-DPE_DEBUG_LOGW \
 		-DPE_DEBUG_LOGE \
+                -DDXE_TRACE \
 		-DDEBUG
 endif
 
@@ -552,15 +606,7 @@ endif
 #normally, TDLS negative behavior is not needed
 ifeq ($(CONFIG_QCOM_TDLS),y)
 CDEFINES += -DFEATURE_WLAN_TDLS
-ifeq ($(BUILD_DEBUG_VERSION),1)
-CDEFINES += -DWLAN_FEATURE_TDLS_DEBUG
-endif
 CDEFINES += -DCONFIG_TDLS_IMPLICIT
-#CDEFINES += -DFEATURE_WLAN_TDLS_NEGATIVE
-#Code under FEATURE_WLAN_TDLS_INTERNAL is ported from volans, This code
-#is not tested only verifed that it compiles. This is not required for
-#supplicant based implementation
-#CDEFINES += -DFEATURE_WLAN_TDLS_INTERNAL
 endif
 
 ifeq ($(CONFIG_PRIMA_WLAN_BTAMP),y)
@@ -600,28 +646,38 @@ ifeq ($(RE_ENABLE_WIFI_ON_WDI_TIMEOUT),1)
 CDEFINES += -DWDI_RE_ENABLE_WIFI_ON_WDI_TIMEOUT
 endif
 
+ifeq ($(KERNEL_BUILD),1)
 CDEFINES += -DWLAN_OPEN_SOURCE
+endif
+
+ifeq ($(findstring opensource, $(WLAN_ROOT)), opensource)
+CDEFINES += -DWLAN_OPEN_SOURCE
+endif
 
 ifeq ($(CONFIG_ENABLE_LINUX_REG), y)
 CDEFINES += -DCONFIG_ENABLE_LINUX_REG
 endif
 
-ifeq ($(MEASURE_ROAM_TIME_DELAY),1)
-CDEFINES += -DDEBUG_ROAM_DELAY
-endif
-
 CDEFINES += -DFEATURE_WLAN_CH_AVOID
+CDEFINES += -DWLAN_FEATURE_AP_HT40_24G
 
-ifeq ($(EXISTS_MSM_SMD),1)
+# Some kernel include files are being moved.  Check to see if
+# the old version of the files are present
+
+ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/mach-msm/include/mach/msm_smd.h),)
 CDEFINES += -DEXISTS_MSM_SMD
 endif
 
-ifeq ($(EXISTS_MSM_SMSM),1)
+ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/mach-msm/include/mach/msm_smsm.h),)
 CDEFINES += -DEXISTS_MSM_SMSM
 endif
 
 # Fix build for GCC 4.7
-EXTRA_CFLAGS += -Wno-maybe-uninitialized -Wno-unused-function
+EXTRA_CFLAGS += -Wno-maybe-uninitialized -Wno-unused-function -Wno-unused-variable
+
+ifeq ($(CONFIG_WLAN_OFFLOAD_PACKETS),y)
+CDEFINES += -DWLAN_FEATURE_OFFLOAD_PACKETS
+endif
 
 KBUILD_CPPFLAGS += $(CDEFINES)
 
