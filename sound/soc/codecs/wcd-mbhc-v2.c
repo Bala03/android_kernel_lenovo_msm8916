@@ -490,6 +490,7 @@ static bool wcd_mbhc_is_hph_pa_on(struct wcd_mbhc *mbhc)
 static void wcd_mbhc_set_and_turnoff_hph_padac(struct wcd_mbhc *mbhc)
 {
 	u8 wg_time;
+	u8 state = 0;
 
 	WCD_MBHC_REG_READ(WCD_MBHC_HPH_CNP_WG_TIME, wg_time);
 	wg_time += 1;
@@ -504,6 +505,12 @@ static void wcd_mbhc_set_and_turnoff_hph_padac(struct wcd_mbhc *mbhc)
 		pr_debug("%s PA is off\n", __func__);
 	}
 	WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_HPH_PA_EN, 0);
+	state = gpio_get_value(EXT_SPK_AMP_GPIO);
+	 pr_debug("%s external audio pa state:%d\n", __func__,state);
+	  if(!state) {
+	snd_soc_update_bits(codec, MSM8X16_WCD_A_ANALOG_RX_HPH_CNP_EN,
+			    0x30, 0x00);
+	  }
 	usleep_range(wg_time * 1000, wg_time * 1000 + 50);
 }
 
@@ -566,6 +573,7 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 			 jack_type, mbhc->hph_status);
 		wcd_mbhc_jack_report(mbhc, &mbhc->headset_jack,
 				mbhc->hph_status, WCD_MBHC_JACK_MASK);
+		msm8x16_wcd_codec_set_headset_state(mbhc->hph_status);
 		wcd_mbhc_set_and_turnoff_hph_padac(mbhc);
 		hphrocp_off_report(mbhc, SND_JACK_OC_HPHR);
 		hphlocp_off_report(mbhc, SND_JACK_OC_HPHL);
@@ -675,8 +683,10 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 				    (mbhc->hph_status | SND_JACK_MECHANICAL),
 				    WCD_MBHC_JACK_MASK);
 		wcd_mbhc_clr_and_turnon_hph_padac(mbhc);
+		msm8x16_wcd_codec_set_headset_state(mbhc->hph_status);
 	}
 	pr_debug("%s: leave hph_status %x\n", __func__, mbhc->hph_status);
+
 }
 
 static void wcd_mbhc_find_plug_and_report(struct wcd_mbhc *mbhc,
@@ -1213,12 +1223,34 @@ static void wcd_mbhc_detect_plug_type(struct wcd_mbhc *mbhc)
 	bool micbias1 = false;
 	int cross_conn;
 	int try = 0;
+	int times = 0;
+	int i = 0;
+	bool is_pa_on;
 
 	pr_debug("%s: enter\n", __func__);
+retry:
 	WCD_MBHC_RSC_ASSERT_LOCKED(mbhc);
 
 	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
 		mbhc->mbhc_cb->hph_pull_down_ctrl(codec, false);
+	for (i = 0; i < 3; i++) {
+		WCD_MBHC_RSC_LOCK(mbhc);
+		mbhc->is_btn_press = false;
+		snd_soc_update_bits(codec,
+			MSM8X16_WCD_A_ANALOG_MBHC_FSM_CTL,
+			0x80, 0x00);
+		snd_soc_update_bits(codec,
+			MSM8X16_WCD_A_ANALOG_MBHC_FSM_CTL,
+			0x80, 0x80);
+		WCD_MBHC_RSC_UNLOCK(mbhc);
+		timeout_result = wait_event_interruptible_timeout(mbhc->wait_btn_press,
+				mbhc->is_btn_press, timeout);
+		if (timeout_result) {
+			pr_debug("%s:debug is headphone\n", __func__);
+		} else {
+			pr_debug("%s:debug is headset\n", __func__);
+		}
+	}
 
 	if (mbhc->mbhc_cb->micbias_enable_status)
 		micbias1 = mbhc->mbhc_cb->micbias_enable_status(mbhc,
@@ -1226,6 +1258,29 @@ static void wcd_mbhc_detect_plug_type(struct wcd_mbhc *mbhc)
 
 	if (mbhc->mbhc_cb->set_cap_mode)
 		mbhc->mbhc_cb->set_cap_mode(codec, micbias1, true);
+
+		is_pa_on = snd_soc_read(codec,
+			MSM8X16_WCD_A_ANALOG_RX_HPH_CNP_EN) &
+			0x30;
+		pr_debug("%s: result1 %x, result2 %x, is_pa_on is %d\n", __func__,
+						result1, result2, is_pa_on);
+		if ((!(result2 & 0x01)) && (!is_pa_on)) {
+			/*
+			 * Cross connection result is not reliable
+			 * so do check for it for 4 times to conclude
+			 * cross connection occured or not.
+			 */
+			do {
+				cross_conn = wcd_check_cross_conn(mbhc);
+				try++;
+			} while (try < GND_MIC_SWAP_THRESHOLD);
+			if (cross_conn) {
+				pr_debug("%s: cross con found, start polling\n",
+					 __func__);
+				plug_type = MBHC_PLUG_TYPE_GND_MIC_SWAP;
+				goto exit;
+			}
+		}
 
 	if (mbhc->mbhc_cb->mbhc_micbias_control)
 		mbhc->mbhc_cb->mbhc_micbias_control(codec, MICB_ENABLE);
@@ -1262,7 +1317,6 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 	dev_dbg(codec->dev, "%s: enter\n", __func__);
 
 	WCD_MBHC_RSC_LOCK(mbhc);
-
 	mbhc->in_swch_irq_handler = true;
 
 	/* cancel pending button press */
@@ -1292,6 +1346,12 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 
 	if ((mbhc->current_plug == MBHC_PLUG_TYPE_NONE) &&
 	    detection_type) {
+		snd_soc_write(codec, MSM8X16_WCD_A_ANALOG_MBHC_DBNC_TIMER, 0x78);
+		msleep(150);
+	    /*enable HS_US_EU_EN_GPIO */
+		gpio_direction_output(HS_US_EU_EN_GPIO, true);	
+		msleep(150);
+		//gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, true);
 		/* Make sure MASTER_BIAS_CTL is enabled */
 		mbhc->mbhc_cb->mbhc_bias(codec, true);
 
@@ -1319,6 +1379,7 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 		wcd_mbhc_detect_plug_type(mbhc);
 	} else if ((mbhc->current_plug != MBHC_PLUG_TYPE_NONE)
 			&& !detection_type) {
+		snd_soc_write(codec, MSM8X16_WCD_A_ANALOG_MBHC_DBNC_TIMER, 0x98);
 		/* Disable external voltage source to micbias if present */
 		if (mbhc->mbhc_cb->enable_mb_source)
 			mbhc->mbhc_cb->enable_mb_source(codec, false);
@@ -1333,6 +1394,7 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 			mbhc->mbhc_cb->set_cap_mode(codec, micbias1, false);
 
 		mbhc->btn_press_intr = false;
+
 		if (mbhc->current_plug == MBHC_PLUG_TYPE_HEADPHONE) {
 			wcd_mbhc_report_plug(mbhc, 0, SND_JACK_HEADPHONE);
 		} else if (mbhc->current_plug == MBHC_PLUG_TYPE_GND_MIC_SWAP) {
@@ -1367,6 +1429,9 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 			WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_ELECT_SCHMT_ISRC, 0);
 			wcd_mbhc_report_plug(mbhc, 0, SND_JACK_LINEOUT);
 		}
+		/*disable HS_US_EU_EN_GPIO */
+		gpio_direction_output(HS_US_EU_EN_GPIO, false);
+		gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, false);
 	} else if (!detection_type) {
 		/* Disable external voltage source to micbias if present */
 		if (mbhc->mbhc_cb->enable_mb_source)
@@ -1416,20 +1481,11 @@ static int wcd_mbhc_get_button_mask(struct wcd_mbhc *mbhc)
 	case 2:
 		mask = SND_JACK_BTN_2;
 		break;
-	case 3:
-		mask = SND_JACK_BTN_3;
-		break;
-	case 4:
-		mask = SND_JACK_BTN_4;
-		break;
-	case 5:
-		mask = SND_JACK_BTN_5;
-		break;
-	case 6:
-		mask = SND_JACK_BTN_6;
-		break;
 	case 7:
-		mask = SND_JACK_BTN_7;
+		mask = SND_JACK_BTN_2;
+		break;
+	case 15:
+		mask = SND_JACK_BTN_2;
 		break;
 	default:
 		break;
@@ -1588,6 +1644,7 @@ static irqreturn_t wcd_mbhc_hs_rem_irq(int irq, void *data)
 			}
 		}
 	}
+
 	WCD_MBHC_RSC_UNLOCK(mbhc);
 	pr_debug("%s: leave\n", __func__);
 	return IRQ_HANDLED;
@@ -2054,6 +2111,7 @@ int wcd_mbhc_start(struct wcd_mbhc *mbhc,
 	if ((!mbhc->is_btn_already_regd) && wcd_mbhc_set_keycode(mbhc))
 		pr_err("Set btn key code error!!!\n");
 
+	gpio_direction_output(EXT_SPK_AMP_HEADSET_GPIO, false);
 	if (!mbhc->mbhc_cfg->read_fw_bin ||
 	    (mbhc->mbhc_cfg->read_fw_bin && mbhc->mbhc_fw) ||
 	    (mbhc->mbhc_cfg->read_fw_bin && mbhc->mbhc_cal)) {
@@ -2084,6 +2142,7 @@ void wcd_mbhc_stop(struct wcd_mbhc *mbhc)
 				   false);
 	mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->hph_right_ocp,
 				   false);
+
 
 	if (mbhc->mbhc_fw || mbhc->mbhc_cal) {
 		cancel_delayed_work_sync(&mbhc->mbhc_firmware_dwork);
@@ -2183,7 +2242,7 @@ int wcd_mbhc_init(struct wcd_mbhc *mbhc, struct snd_soc_codec *codec,
 		}
 
 		ret = snd_jack_set_key(mbhc->button_jack.jack,
-				       SND_JACK_BTN_0,
+				       SND_JACK_BTN_2,
 				       KEY_MEDIA);
 		if (ret) {
 			pr_err("%s: Failed to set code for btn-0\n",
@@ -2331,6 +2390,7 @@ void wcd_mbhc_deinit(struct wcd_mbhc *mbhc)
 	if (mbhc->mbhc_cb && mbhc->mbhc_cb->register_notifier)
 		mbhc->mbhc_cb->register_notifier(codec, &mbhc->nblock, false);
 	mutex_destroy(&mbhc->codec_resource_lock);
+
 }
 EXPORT_SYMBOL(wcd_mbhc_deinit);
 
